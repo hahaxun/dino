@@ -103,7 +103,7 @@ def get_args_parser():
         choices=['adamw', 'sgd', 'lars'], help="""Type of optimizer. We recommend using adamw with ViTs.""")
 
     # Multi-crop parameters
-    parser.add_argument('--global_crops_scale', type=float, nargs='+', default=(0.4, 1.),
+    parser.add_argument('--global_crops_scale', type=float, nargs='+', default=(1., 1.),
         help="""Scale range of the cropped image before resizing, relatively to the origin image.
         Used for large global view cropping. When disabling multi-crop (--local_crops_number 0), we
         recommand using a wider range of scale ("--global_crops_scale 0.14 1." for example)""")
@@ -410,14 +410,19 @@ class DINOLoss(nn.Module):
 
 class DataAugmentationDINO(object):
     def __init__(self, global_crops_scale, local_crops_scale, local_crops_number):
-        flip_and_color_jitter = transforms.Compose([
-            transforms.RandomHorizontalFlip(p=0.5),
+        color_jitter = transforms.Compose([
             transforms.RandomApply(
                 [transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.2, hue=0.1)],
                 p=0.8
             ),
             transforms.RandomGrayscale(p=0.2),
         ])
+
+        flip_and_color_jitter = transforms.Compose([
+            transforms.RandomHorizontalFlip(p=0.5),
+            color_jitter,
+        ])
+
         normalize = transforms.Compose([
             transforms.ToTensor(),
             transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
@@ -426,14 +431,14 @@ class DataAugmentationDINO(object):
         # first global crop
         self.global_transfo1 = transforms.Compose([
             transforms.RandomResizedCrop(224, scale=global_crops_scale, interpolation=Image.BICUBIC),
-            flip_and_color_jitter,
+            color_jitter,
             utils.GaussianBlur(1.0),
             normalize,
         ])
         # second global crop
         self.global_transfo2 = transforms.Compose([
             transforms.RandomResizedCrop(224, scale=global_crops_scale, interpolation=Image.BICUBIC),
-            flip_and_color_jitter,
+            color_jitter,
             utils.GaussianBlur(0.1),
             utils.Solarization(0.2),
             normalize,
