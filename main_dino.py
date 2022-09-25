@@ -29,6 +29,7 @@ import torch.backends.cudnn as cudnn
 import torch.nn.functional as F
 from torchvision import datasets, transforms
 from torchvision import models as torchvision_models
+import dino_dataset 
 
 import utils
 import vision_transformer as vits
@@ -37,6 +38,15 @@ from vision_transformer import DINOHead
 torchvision_archs = sorted(name for name in torchvision_models.__dict__
     if name.islower() and not name.startswith("__")
     and callable(torchvision_models.__dict__[name]))
+
+def default_loader(path: str) :
+    from torchvision import get_image_backend
+
+    if get_image_backend() == "accimage":
+        return accimage_loader(path)
+    else:
+        return pil_loader(path)
+
 
 def get_args_parser():
     parser = argparse.ArgumentParser('DINO', add_help=False)
@@ -87,7 +97,7 @@ def get_args_parser():
     parser.add_argument('--clip_grad', type=float, default=3.0, help="""Maximal parameter
         gradient norm if using gradient clipping. Clipping with norm .3 ~ 1.0 can
         help optimization for larger ViT architectures. 0 for disabling.""")
-    parser.add_argument('--batch_size_per_gpu', default=64, type=int,
+    parser.add_argument('--batch_size_per_gpu', default=128, type=int,
         help='Per-GPU batch-size : number of distinct images loaded on one GPU.')
     parser.add_argument('--epochs', default=100, type=int, help='Number of epochs of training.')
     parser.add_argument('--freeze_last_layer', default=1, type=int, help="""Number of epochs
@@ -142,7 +152,8 @@ def train_dino(args):
         args.local_crops_scale,
         args.local_crops_number,
     )
-    dataset = datasets.ImageFolder(args.data_path, transform=transform)
+    #dataset = datasets.ImageFolder(args.data_path, transform=transform)
+    dataset = dino_dataset.DatasetFolder(args.data_path, default_loader,transform=transform)
     sampler = torch.utils.data.DistributedSampler(dataset, shuffle=True)
     data_loader = torch.utils.data.DataLoader(
         dataset,
