@@ -9,6 +9,9 @@ from PIL import Image
 from io import BytesIO
 
 from torchvision.datasets.vision import VisionDataset
+import gc
+
+session = requests.Session()
 
 class DatasetFolder(VisionDataset):
     """A generic data loader.
@@ -91,7 +94,12 @@ class DatasetFolder(VisionDataset):
             # is potentially overridden and thus could have a different logic.
             raise ValueError("The class_to_idx parameter cannot be None.")
         return make_dataset(directory, class_to_idx, extensions=extensions, is_valid_file=is_valid_file)
-
+    
+    def run_download(self,url):
+        response = session.get(url)
+        img = Image.open(BytesIO(response.content)).convert('RGB')
+        return img
+    
     def find_classes(self, directory: str) -> Tuple[List[str], Dict[str, int]]:
         """Find the class folders in a dataset structured as follows::
 
@@ -130,17 +138,25 @@ class DatasetFolder(VisionDataset):
             tuple: (sample, target) where target is class_index of the target class.
         """
         path, target = self.samples[index].split(" ")
+        
+        up_x, up_y, bottom_x, bottom_y, _, _, _, _ = target.split("_")
+        up_x, up_y, bottom_x, bottom_y = int(up_x), int(up_y), int(bottom_x), int(bottom_y)
+
+        target = int(path.split("/")[-1].split("_")[0])
         try:
-            sample = Image.open(BytesIO(requests.get(path).content)).convert('RGB')#self.loader(path)
-        except:
+            sample = self.run_download(path)#self.loader(path)
+        except Exception as e:
+            print(e)
             rgb_array = numpy.random.rand(224,224,3) * 255
             sample = Image.fromarray(rgb_array.astype('uint8')).convert('RGB')
         if self.transform is not None:
-            sample = self.transform(sample)
+            sample_v2 = self.transform(sample, (up_x, up_y, bottom_x,bottom_y))
         if self.target_transform is not None:
             target = self.target_transform(target)
-
-        return sample, target
+        del sample
+        if index % 1000 == 0:
+            gc.collect()
+        return sample_v2, target
 
     def __len__(self) -> int:
         return len(self.samples)
