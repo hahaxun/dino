@@ -34,6 +34,11 @@ import dino_dataset
 import utils
 import vision_transformer as vits
 from vision_transformer import DINOHead
+from pytorch_metric_learning import losses
+from pytorch_metric_learning.distances import CosineSimilarity
+from pytorch_metric_learning.reducers import MeanReducer
+from pytorch_metric_learning.regularizers import LpRegularizer
+import dino_distributed_sampler as dino_sampler
 
 torchvision_archs = sorted(name for name in torchvision_models.__dict__
     if name.islower() and not name.startswith("__")
@@ -97,16 +102,16 @@ def get_args_parser():
     parser.add_argument('--clip_grad', type=float, default=3.0, help="""Maximal parameter
         gradient norm if using gradient clipping. Clipping with norm .3 ~ 1.0 can
         help optimization for larger ViT architectures. 0 for disabling.""")
-    parser.add_argument('--batch_size_per_gpu', default=128, type=int,
+    parser.add_argument('--batch_size_per_gpu', default=160, type=int,
         help='Per-GPU batch-size : number of distinct images loaded on one GPU.')
-    parser.add_argument('--epochs', default=100, type=int, help='Number of epochs of training.')
+    parser.add_argument('--epochs', default=20, type=int, help='Number of epochs of training.')
     parser.add_argument('--freeze_last_layer', default=1, type=int, help="""Number of epochs
         during which we keep the output layer fixed. Typically doing so during
         the first epoch helps training. Try increasing this value if the loss does not decrease.""")
     parser.add_argument("--lr", default=0.0005, type=float, help="""Learning rate at the end of
         linear warmup (highest LR used during training). The learning rate is linearly scaled
         with the batch size, and specified here for a reference batch size of 256.""")
-    parser.add_argument("--warmup_epochs", default=10, type=int,
+    parser.add_argument("--warmup_epochs", default=1, type=int,
         help="Number of epochs for the linear learning-rate warm up.")
     parser.add_argument('--min_lr', type=float, default=1e-6, help="""Target LR at the
         end of optimization. We use a cosine LR schedule with linear warmup.""")
@@ -115,11 +120,11 @@ def get_args_parser():
     parser.add_argument('--drop_path_rate', type=float, default=0.1, help="stochastic depth rate")
 
     # Multi-crop parameters
-    parser.add_argument('--global_crops_scale', type=float, nargs='+', default=(0.4, 1.),
+    parser.add_argument('--global_crops_scale', type=float, nargs='+', default=(0.14, 1.),
         help="""Scale range of the cropped image before resizing, relatively to the origin image.
         Used for large global view cropping. When disabling multi-crop (--local_crops_number 0), we
         recommand using a wider range of scale ("--global_crops_scale 0.14 1." for example)""")
-    parser.add_argument('--local_crops_number', type=int, default=8, help="""Number of small
+    parser.add_argument('--local_crops_number', type=int, default=1, help="""Number of small
         local views to generate. Set this parameter to 0 to disable multi-crop training.
         When disabling multi-crop we recommend to use "--global_crops_scale 0.14 1." """)
     parser.add_argument('--local_crops_scale', type=float, nargs='+', default=(0.05, 0.4),
@@ -154,7 +159,7 @@ def train_dino(args):
     )
     #dataset = datasets.ImageFolder(args.data_path, transform=transform)
     dataset = dino_dataset.DatasetFolder(args.data_path, default_loader,transform=transform)
-    sampler = torch.utils.data.DistributedSampler(dataset, shuffle=True)
+    sampler = dino_sampler.DistributedSampler(dataset, shuffle=False)
     data_loader = torch.utils.data.DataLoader(
         dataset,
         sampler=sampler,
@@ -232,6 +237,13 @@ def train_dino(args):
         args.epochs,
     ).cuda()
 
+    '''triple_loss = losses.TripletMarginLoss(
+        distance = CosineSimilarity(), 
+	reducer = MeanReducer(), 
+	embedding_regularizer = LpRegularizer()
+    ).cuda()'''
+    triple_loss=losses.NTXentLoss().cuda()
+
     # ============ preparing optimizer ... ============
     params_groups = utils.get_params_groups(student)
     if args.optimizer == "adamw":
@@ -281,7 +293,7 @@ def train_dino(args):
         data_loader.sampler.set_epoch(epoch)
 
         # ============ training one epoch of DINO ... ============
-        train_stats = train_one_epoch(student, teacher, teacher_without_ddp, dino_loss,
+        train_stats = train_one_epoch(student, teacher, teacher_without_ddp, dino_loss,triple_loss,
             data_loader, optimizer, lr_schedule, wd_schedule, momentum_schedule,
             epoch, fp16_scaler, args)
 
@@ -309,12 +321,12 @@ def train_dino(args):
     print('Training time {}'.format(total_time_str))
 
 
-def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loader,
+def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, triple_loss, data_loader,
                     optimizer, lr_schedule, wd_schedule, momentum_schedule,epoch,
                     fp16_scaler, args):
     metric_logger = utils.MetricLogger(delimiter="  ")
     header = 'Epoch: [{}/{}]'.format(epoch, args.epochs)
-    for it, (images, _) in enumerate(metric_logger.log_every(data_loader, 10, header)):
+    for it, (images, labels) in enumerate(metric_logger.log_every(data_loader, 10, header)):
         # update weight decay and learning rate according to their schedule
         it = len(data_loader) * epoch + it  # global training iteration
         for i, param_group in enumerate(optimizer.param_groups):
@@ -328,7 +340,10 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
         with torch.cuda.amp.autocast(fp16_scaler is not None):
             teacher_output = teacher(images[:2])  # only the 2 global views pass through the teacher
             student_output = student(images)
-            loss = dino_loss(student_output, teacher_output, epoch)
+            b = list(labels.shape)[0]
+            dino_loss_value = 0.4 * dino_loss(student_output[:-b], teacher_output, epoch) 
+            triple_loss_value = 0.6 * triple_loss(student_output[-b:], labels)
+            loss =  triple_loss_value +  dino_loss_value
 
         if not math.isfinite(loss.item()):
             print("Loss is {}, stopping training".format(loss.item()), force=True)
@@ -362,7 +377,10 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
 
         # logging
         torch.cuda.synchronize()
+        del images
         metric_logger.update(loss=loss.item())
+        #metric_logger.update(dino_loss=dino_loss_value.item())
+        metric_logger.update(triple_loss=triple_loss_value.item())
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
         metric_logger.update(wd=optimizer.param_groups[0]["weight_decay"])
     # gather the stats from all processes
@@ -471,15 +489,23 @@ class DataAugmentationDINO(object):
             transforms.RandomResizedCrop(96, scale=local_crops_scale, interpolation=Image.BICUBIC),
             flip_and_color_jitter,
             utils.GaussianBlur(p=0.5),
+            normalize
+        ])
+        #final transformation of object
+        self.global_transfo2 = transforms.Compose([
+            transforms.Resize((224,224), interpolation=Image.BICUBIC),
+            flip_and_color_jitter,
+            utils.GaussianBlur(1.0),
             normalize,
         ])
 
-    def __call__(self, image):
+    def __call__(self, image, crop_pos):
         crops = []
         crops.append(self.global_transfo1(image))
         crops.append(self.global_transfo2(image))
         for _ in range(self.local_crops_number):
             crops.append(self.local_transfo(image))
+        crops.append(self.global_transfo2(image.crop(crop_pos)))
         return crops
 
 
