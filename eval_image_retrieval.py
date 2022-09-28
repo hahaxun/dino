@@ -24,7 +24,8 @@ from torchvision import models as torchvision_models
 from torchvision import transforms as pth_transforms
 from PIL import Image, ImageFile
 import numpy as np
-
+import requests
+from io import BytesIO
 import utils
 import vision_transformer as vits
 from eval_knn import extract_features
@@ -59,13 +60,17 @@ class OxfordParisDataset(torch.utils.data.Dataset):
         return len(self.samples)
 
     def __getitem__(self, index):
-        path = os.path.join(self.cfg["dir_images"], self.samples[index] + ".jpg")
+        #path = os.path.join(self.cfg["dir_images"], self.samples[index] + ".jpg")
+        path, bbox = self.samples[index].split(" ")
+
+        up_x, up_y, down_x, down_y, width, height, score, obj_type = bbox.replace("\n","").split("_")
+
+        response = requests.get(path)
+        img = Image.open(BytesIO(response.content)).convert('RGB').crop(((int(up_x) // 32 ) * 32,(int(up_y) // 32 ) * 32,(int(down_x) // 32 + 1) * 32,(int(down_y) // 32 + 1) * 32))
+        
         ImageFile.LOAD_TRUNCATED_IMAGES = True
-        with open(path, 'rb') as f:
-            img = Image.open(f)
-            img = img.convert('RGB')
-        if self.imsize is not None:
-            img.thumbnail((self.imsize, self.imsize), Image.ANTIALIAS)
+        #if int(width) < 32 or int(height) < 32:
+        img=img.resize((self.imsize, self.imsize))
         if self.transform is not None:
             img = self.transform(img)
         return img, index
@@ -91,7 +96,7 @@ if __name__ == '__main__':
     parser.add_argument('--patch_size', default=16, type=int, help='Patch resolution of the model.')
     parser.add_argument("--checkpoint_key", default="teacher", type=str,
         help='Key to use in the checkpoint (example: "teacher")')
-    parser.add_argument('--num_workers', default=10, type=int, help='Number of data loading workers per GPU.')
+    parser.add_argument('--num_workers', default=30, type=int, help='Number of data loading workers per GPU.')
     parser.add_argument("--dist_url", default="env://", type=str, help="""url used to set up
         distributed training; see https://pytorch.org/docs/stable/distributed.html""")
     parser.add_argument("--local_rank", default=0, type=int, help="Please ignore and do not set this argument.")
@@ -172,14 +177,16 @@ if __name__ == '__main__':
 
         ############################################################################
         # Step 2: similarity
-        sim = torch.mm(train_features, query_features.T)
-        ranks = torch.argsort(-sim, dim=0).cpu().numpy()
+        sim = torch.mm(query_features,train_features.T)
+        ranks = torch.topk(sim,10,dim=1)
 
         ############################################################################
         # Step 3: evaluate
-        gnd = dataset_train.cfg['gnd']
+        gnd = 0#dataset_train.cfg['gnd']
         # evaluate ranks
         ks = [1, 5, 10]
+        print(ranks)
+        '''
         # search for easy & hard
         gnd_t = []
         for i in range(len(gnd)):
@@ -198,4 +205,5 @@ if __name__ == '__main__':
         mapH, apsH, mprH, prsH = utils.compute_map(ranks, gnd_t, ks)
         print('>> {}: mAP M: {}, H: {}'.format(args.dataset, np.around(mapM*100, decimals=2), np.around(mapH*100, decimals=2)))
         print('>> {}: mP@k{} M: {}, H: {}'.format(args.dataset, np.array(ks), np.around(mprM*100, decimals=2), np.around(mprH*100, decimals=2)))
+        '''
     dist.barrier()
