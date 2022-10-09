@@ -10,6 +10,7 @@ from io import BytesIO
 
 from torchvision.datasets.vision import VisionDataset
 import gc
+import random
 
 session = requests.Session()
 
@@ -52,6 +53,7 @@ class DatasetFolder(VisionDataset):
         super().__init__(root, transform=transform, target_transform=target_transform)
         #classes, class_to_idx = self.find_classes(self.root)
         samples = open(root,"r").readlines()#self.make_dataset(self.root, class_to_idx, extensions, is_valid_file)
+        self.id_samples = open(root+".note", "r").readlines()
 
         self.loader = loader
         self.extensions = extensions
@@ -95,6 +97,32 @@ class DatasetFolder(VisionDataset):
             raise ValueError("The class_to_idx parameter cannot be None.")
         return make_dataset(directory, class_to_idx, extensions=extensions, is_valid_file=is_valid_file)
     
+    def extract_url_list(self,note_id):
+        prefix = "http://nlpfeature.int.xiaohongshu.com/api/feature/str/"
+        file_id_prefix = "http://ci.xiaohongshu.com/"
+        note_id = note_id.split("/")[0]
+        x = session.get(prefix+note_id)
+        note = x.json()
+        bbox_mapping = {}
+        image_ocr = note.get('image_ocr')
+        for _ in image_ocr:
+            bbox = []
+            detectInfos = _['obj_detect']['detectInfos']
+            for detectInfo in detectInfos:
+                coordinates = detectInfo['coordinates']
+                top_left_x = coordinates[0]['x']
+                top_left_y = coordinates[0]['y']
+                down_right_x = coordinates[1]['x']
+                down_right_y = coordinates[1]['y']
+                top_left = (top_left_x,top_left_y)
+                down_right = (down_right_x, down_right_y)
+                bbox.append((top_left,down_right))
+            if len(bbox) > 0:
+                bbox_mapping[file_id_prefix + _['file_id']]=bbox
+        keys_list=bbox_mapping.keys()
+        curr_index = random.randint(0, len(keys_list)) 
+        return keys_list[curr_index],bbox_mapping[keys_list[curr_index]][0]
+
     def run_download(self,url):
         response = session.get(url)
         img = Image.open(BytesIO(response.content)).convert('RGB')
@@ -137,12 +165,22 @@ class DatasetFolder(VisionDataset):
         Returns:
             tuple: (sample, target) where target is class_index of the target class.
         """
-        path, target = self.samples[index].split(" ")
-        
-        up_x, up_y, bottom_x, bottom_y, _, _, _, _ = target.split("_")
-        up_x, up_y, bottom_x, bottom_y = int(up_x), int(up_y), int(bottom_x), int(bottom_y)
+        random.seed(index)
+        df_margin = random.random()
+        if df_margin < 0.3:
+            index = random.randint(0, len(self.id_samples) - 1)
+            note_id = self.id_samples[index]
+            path, bbox = self.extract_url_list(note_id) 
 
-        target = int(path.split("/")[-1].split("_")[0])
+            (up_x, up_y), (bottom_x, bottom_y) = bbox
+            target = str(index)
+        else:
+            path, target = self.samples[index].split(" ")
+        
+            up_x, up_y, bottom_x, bottom_y, _, _, _, _ = target.split("_")
+            up_x, up_y, bottom_x, bottom_y = int(up_x), int(up_y), int(bottom_x), int(bottom_y)
+
+            target = int(path.split("/")[-1].split("_")[0])
         try:
             sample = self.run_download(path)#self.loader(path)
         except Exception as e:
@@ -150,7 +188,7 @@ class DatasetFolder(VisionDataset):
             rgb_array = numpy.random.rand(224,224,3) * 255
             sample = Image.fromarray(rgb_array.astype('uint8')).convert('RGB')
         if self.transform is not None:
-            sample_v2 = self.transform(sample, (up_x, up_y, bottom_x,bottom_y))
+            sample_v2 = self.transform(sample,(up_x, up_y, bottom_x, bottom_y))
         if self.target_transform is not None:
             target = self.target_transform(target)
         del sample
