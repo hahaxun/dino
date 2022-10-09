@@ -14,6 +14,11 @@ import random
 
 session = requests.Session()
 
+def single_json(noteid):
+    prefix = "http://nlpfeature.int.xiaohongshu.com/api/feature/str/"
+    x = session.get(prefix+noteid)
+    return x.json()
+
 class DatasetFolder(VisionDataset):
     """A generic data loader.
 
@@ -98,11 +103,8 @@ class DatasetFolder(VisionDataset):
         return make_dataset(directory, class_to_idx, extensions=extensions, is_valid_file=is_valid_file)
     
     def extract_url_list(self,note_id):
-        prefix = "http://nlpfeature.int.xiaohongshu.com/api/feature/str/"
         file_id_prefix = "http://ci.xiaohongshu.com/"
-        note_id = note_id.split("/")[0]
-        x = session.get(prefix+note_id)
-        note = x.json()
+        note = single_json(note_id)
         bbox_mapping = {}
         image_ocr = note.get('image_ocr')
         for _ in image_ocr:
